@@ -51,3 +51,7 @@ faiss_index/
 
 .cache/
 *.cache
+
+
+*.ini
+uploads/
