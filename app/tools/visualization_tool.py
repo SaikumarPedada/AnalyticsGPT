@@ -5,6 +5,7 @@ from app.core.logging import get_logger
 import plotly.express as px
 import pandas as pd
 import json
+import warnings
 
 logger = get_logger(__name__)
 
@@ -14,17 +15,37 @@ def _numeric_columns(df: pd.DataFrame) -> list[str]:
     return df.select_dtypes(include=["number"]).columns.tolist()
 
 
+def _is_date_column(series: pd.Series) -> bool:
+    """
+    Safely probe whether a Series looks like dates.
+    - format='mixed'  (pandas >= 2.0) tells pandas each element may have its
+      own format — suppresses the "could not infer format" UserWarning.
+    - errors='coerce' turns unparseable values into NaT instead of raising.
+    - We require >= 80 % of the sample to parse successfully so we don't
+      accidentally flag an ID or description column as a date.
+    """
+    sample = series.dropna().head(10)
+    if sample.empty:
+        return False
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            parsed = pd.to_datetime(sample, format="mixed", errors="coerce")
+        return parsed.notna().mean() >= 0.8
+    except Exception:
+        return False
+
+
 def _date_columns(df: pd.DataFrame) -> list[str]:
-    """Return column names that are datetime or look like dates."""
+    """Return column names that are already datetime or look like dates."""
+    # Columns already typed as datetime by pandas
     date_cols = df.select_dtypes(include=["datetime", "datetimetz"]).columns.tolist()
-    # Also catch string columns that pandas hasn't parsed yet
+
+    # Probe object/string columns — silently, without UserWarnings
     for col in df.select_dtypes(include=["object"]).columns:
-        sample = df[col].dropna().head(5)
-        try:
-            pd.to_datetime(sample)
+        if _is_date_column(df[col]):
             date_cols.append(col)
-        except Exception:
-            pass
+
     return date_cols
 
 
@@ -47,8 +68,8 @@ def _safe_config(config: dict, df: pd.DataFrame, query: str) -> dict:
     """
     Validate and repair the LLM's chart config:
     - Ensure x and y are real column names.
-    - Ensure y is numeric. If not, swap to the first numeric column.
-    - Auto-detect chart type from x column type when the LLM picks wrong.
+    - Ensure y is numeric. If not, substitute the first numeric column.
+    - Auto-correct chart type based on x column type.
     """
     columns = list(df.columns)
     numeric = _numeric_columns(df)
@@ -60,19 +81,16 @@ def _safe_config(config: dict, df: pd.DataFrame, query: str) -> dict:
 
     # ── Validate x ──────────────────────────────────────────────────────────
     if x not in columns:
-        # Prefer a date column; fall back to first column
         x = date_cols[0] if date_cols else columns[0]
 
     # ── Validate y — must be numeric ────────────────────────────────────────
     if y not in columns or y not in numeric:
-        # Pick the first numeric column that isn't x
         candidates = [c for c in numeric if c != x]
         if candidates:
             y = candidates[0]
         elif numeric:
             y = numeric[0]
         else:
-            # No numeric columns at all — fall back to second column
             y = columns[1] if len(columns) > 1 else columns[0]
         logger.warning(f"LLM chose non-numeric y; corrected to '{y}'")
 
@@ -135,7 +153,6 @@ async def run_visualization(df: pd.DataFrame, action: str, query: str):
             fig = px.line(df, x=x, y=y, title=f"{y} over {x}")
     except Exception as e:
         logger.error(f"Plotly failed with config {config}: {e}")
-        # Last-resort fallback: first two columns
         fig = px.line(df, x=df.columns[0], y=df.columns[1])
 
     return fig.to_json()
