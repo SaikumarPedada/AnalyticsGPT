@@ -8,7 +8,7 @@ _VALID_MODES = {"analytics", "visualization", "etl"}
 
 class RouterService:
 
-    async def route(self, message: str, mode: str | None) -> str:
+    async def route(self, message: str, mode: str | None, model: str | None = None) -> str:
         # If the user or caller already picked a non-auto mode, honour it
         if mode and mode != "auto":
             return mode
@@ -25,9 +25,10 @@ class RouterService:
         )
 
         try:
-            result = await llm_service.generate([
-                {"role": "user", "content": prompt}
-            ])
+            result = await llm_service.generate(
+                [{"role": "user", "content": prompt}],
+                model=model
+            )
 
             # Extract the first word and normalise
             raw = result["text"].strip().lower()

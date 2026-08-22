@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import List, Dict, Optional
 import json
 
-from app.models import ChatSession, Message, User, UserMemory
+from app.models import ChatSession, Message, User
 from app.services.qdrant_service import qdrant_service
 from app.services.embedding_service import embedding_service
 from app.core.config import get_settings
@@ -37,20 +37,35 @@ class MCPService:
         user_id = session_data["user_id"]
         conversation = session_data.get("conversation", [])
 
+        if not conversation:
+            logger.info(f"Session {session_id} has no messages. Skipping database save.")
+            return
+
         # Generate a title from the first user message
         first_user = next((m["content"] for m in conversation if m["role"] == "user"), None)
         title = (first_user[:72] + "…") if first_user and len(first_user) > 72 else first_user
 
-        session_row = ChatSession(
-            session_id=session_id,
-            user_id=user_id,
-            title=title,
-            session_start=session_data["start_time"],
-            session_end=datetime.utcnow(),
-            tokens_consumed=session_data.get("tokens", 0),
-            tools_used=json.dumps(session_data.get("tools", [])),
-        )
-        db.add(session_row)
+        existing_session = await db.get(ChatSession, session_id)
+        if existing_session:
+            existing_session.tokens_consumed = session_data.get("tokens", 0)
+            existing_session.session_end = datetime.utcnow()
+            if not existing_session.title and title:
+                existing_session.title = title
+            # Delete existing messages in DB for this session
+            await db.execute(
+                Message.__table__.delete().where(Message.session_id == session_id)
+            )
+        else:
+            session_row = ChatSession(
+                session_id=session_id,
+                user_id=user_id,
+                title=title,
+                session_start=session_data["start_time"],
+                session_end=datetime.utcnow(),
+                tokens_consumed=session_data.get("tokens", 0),
+                tools_used=json.dumps(session_data.get("tools", [])),
+            )
+            db.add(session_row)
         await db.flush()   # get session_id into DB before messages FK
 
         messages = []
@@ -207,26 +222,7 @@ class MCPService:
         await db.commit()
         logger.info(f"Session {session_id} deleted")
 
-    # ── User memory ───────────────────────────────────────────────────────────
-    async def get_user_memory(self, db: AsyncSession, user_id: int) -> List[Dict]:
-        result = await db.execute(
-            select(UserMemory).where(UserMemory.user_id == user_id)
-        )
-        return [{"key": m.key, "value": m.value} for m in result.scalars().all()]
 
-    async def upsert_user_memory(
-        self, db: AsyncSession, user_id: int, key: str, value: str, session_id: Optional[str] = None
-    ) -> None:
-        existing = await db.execute(
-            select(UserMemory).where(UserMemory.user_id == user_id, UserMemory.key == key)
-        )
-        row = existing.scalar_one_or_none()
-        if row:
-            row.value = value
-            row.source_session_id = session_id
-        else:
-            db.add(UserMemory(user_id=user_id, key=key, value=value, source_session_id=session_id))
-        await db.commit()
 
 
 mcp_service = MCPService()

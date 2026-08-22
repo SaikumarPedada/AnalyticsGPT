@@ -7,24 +7,20 @@ logger = get_logger(__name__)
 
 class ExplanationService:
 
-    async def generate(self, message: str, steps: list) -> str:
-        if not steps:
+    async def generate(self, message: str, code: str, model: str | None = None) -> str:
+        if not code:
             return ""
-
-        steps_text = "\n".join(
-            f"{i + 1}. {s['tool']} → {s['action']}"
-            for i, s in enumerate(steps)
-        )
 
         prompt = EXPLANATION_PROMPT.format(
             message=message,
-            steps=steps_text,
+            code=code,
         )
 
         try:
-            result = await llm_service.generate([
-                {"role": "user", "content": prompt}
-            ])
+            result = await llm_service.generate(
+                [{"role": "user", "content": prompt}],
+                model=model
+            )
 
             text = result["text"].strip()
 

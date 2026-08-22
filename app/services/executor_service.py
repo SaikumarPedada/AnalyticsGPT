@@ -1,76 +1,71 @@
-from app.tools.etl_tool import run_etl
-from app.tools.analytics_tool import run_analytics
-from app.tools.visualization_tool import run_visualization
+import pandas as pd
+import numpy as np
+import plotly.express as px
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-PRIORITY_MAP = {
-    "auto": ["analytics", "visualization", "etl"],
-    "analytics": ["analytics", "visualization", "etl"],
-    "visualization": ["visualization", "analytics", "etl"],
-    "etl": ["etl", "analytics", "visualization"],
-}
-
 
 class ExecutorService:
 
-    async def execute(self, plan, df, mode: str, query: str, stream_callback=None):
+    async def execute(self, plan, df, mode: str, query: str, stream_callback=None, model: str | None = None):
         if plan is None:
             raise ValueError("No plan provided to executor")
 
-        priority = PRIORITY_MAP.get(mode, PRIORITY_MAP["auto"])
+        code = plan.get("code")
+        is_visualization = plan.get("is_visualization", False)
 
-        steps = sorted(
-            plan.get("steps", []),
-            key=lambda x: priority.index(x["tool"]) if x["tool"] in priority else 999,
-        )
+        if not code:
+            raise ValueError("Plan contains no executable code")
 
-        if not steps:
-            raise ValueError("Plan contains no steps")
+        if stream_callback:
+            await stream_callback("Executing dynamic Python/Pandas analysis...")
 
-        result = None
-        current_df = df  # work on a local copy so original state is not mutated
+        # Setup local scope for execution
+        local_scope = {
+            "df": df.copy() if df is not None else None,
+            "pd": pd,
+            "np": np,
+            "px": px,
+            "fig": None,
+        }
 
-        for step in steps:
-            tool = step.get("tool")
-            action = step.get("action", "")
+        # Run python code
+        try:
+            logger.info("Executing generated python script")
+            compiled_code = compile(code, "<string>", "exec")
+            exec(compiled_code, globals(), local_scope)
+        except Exception as e:
+            logger.exception("Dynamic code execution failed")
+            raise e
 
-            if stream_callback:
-                await stream_callback(f"Running {tool}: {action}")
+        # If it was visualization, extract 'fig' and return plotly json
+        if is_visualization:
+            fig = local_scope.get("fig")
+            if fig is None:
+                raise ValueError("Code finished but did not define the expected 'fig' Plotly Figure variable.")
+            
+            return fig.to_json()
 
-            if tool == "etl":
-                if current_df is None:
-                    raise ValueError("ETL step requires a dataset but none was provided")
-                current_df = run_etl(current_df, action)
+        # Otherwise, extract 'df' and return formatted data
+        updated_df = local_scope.get("df")
+        if updated_df is None:
+            raise ValueError("Code finished but 'df' is None or was deleted.")
 
-            elif tool == "analytics":
-                if current_df is None:
-                    raise ValueError("Analytics step requires a dataset but none was provided")
-                current_df = run_analytics(current_df, action)
+        if isinstance(updated_df, pd.Series):
+            updated_df = updated_df.to_frame()
 
-            elif tool == "visualization":
-                if current_df is None:
-                    raise ValueError("Visualization step requires a dataset but none was provided")
-                result = await run_visualization(current_df, action, query)
-
-            else:
-                logger.warning(f"Unknown tool in plan step: {tool!r} — skipping")
-
-        if result is not None:
-            return result
-
-        # Fallback: return a structured, frontend-friendly dict instead of raw df.to_dict()
-        if current_df is not None:
+        if isinstance(updated_df, pd.DataFrame):
             return {
                 "summary": {
-                    "rows": len(current_df),
-                    "columns": list(current_df.columns),
+                    "rows": len(updated_df),
+                    "columns": list(updated_df.columns),
                 },
-                "data": current_df.head(20).to_dict(orient="records"),
+                "data": updated_df.head(20).to_dict(orient="records"),
             }
 
-        raise ValueError("Execution produced no result and no dataframe to return")
+        # If the code returned something else, return it directly
+        return updated_df
 
 
 executor_service = ExecutorService()

@@ -7,6 +7,7 @@ class AgentState(TypedDict, total=False):
     message: str
     mode: str
     file_path: Optional[str]
+    model: Optional[str]
 
     # Dataset
     df: Any
@@ -14,7 +15,6 @@ class AgentState(TypedDict, total=False):
 
     # Planning
     plan: Dict
-    steps: List[Dict]
 
     # Execution
     result: Any

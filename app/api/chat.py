@@ -181,6 +181,11 @@ async def websocket_chat(
             user_message = payload.get("message", "")
             mode = payload.get("mode", "auto")
             file_path = payload.get("file_path")
+            model = payload.get("model")
+
+            if model and model not in {"openai/gpt-oss-120b", "qwen/qwen3.6-27b"}:
+                await manager.send_error(session_id, "Invalid model. Allowed: openai/gpt-oss-120b, qwen/qwen3.6-27b")
+                continue
 
             if not user_message.strip():
                 continue
@@ -202,6 +207,7 @@ async def websocket_chat(
                         "message": user_message,
                         "mode": mode,
                         "file_path": file_path,
+                        "model": model,
                         "logs": [],
                         "retry_count": 0,
                     }
@@ -232,7 +238,7 @@ async def websocket_chat(
                         current_conversation=current_conv,
                     )
 
-                    result = await llm_service.generate(full_context)
+                    result = await llm_service.generate(full_context, model=model)
 
                     response_text = result["text"]
                     tokens = result["tokens"]
@@ -244,6 +250,14 @@ async def websocket_chat(
 
             # Store assistant message
             cache.add_message(session_id, "assistant", response_text, tokens=tokens)
+
+            # Auto-save session state to DB on every turn
+            try:
+                session_data = cache.get_session(session_id)
+                session_data["session_id"] = session_id
+                await mcp_service.save_session(db, session_data)
+            except Exception as se:
+                logger.error(f"Auto-save session failed: {se}")
 
             # Send final response
             await manager.send_json(session_id, {
