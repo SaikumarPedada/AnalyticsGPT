@@ -19,7 +19,6 @@ pydantic-settings>=2.3.0
 pydantic[email]>=2.7.0
 
 # ───────────── LLM ─────────────
-llama-cpp-python>=0.2.77
 transformers>=4.41.0
 sentencepiece>=0.2.0
 protobuf>=4.25.0

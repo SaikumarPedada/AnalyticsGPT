@@ -8,41 +8,35 @@ class Settings(BaseSettings):
     APP_NAME: str = "AnalyticsGPT"
     APP_ENV: str = "development"
     LOG_LEVEL: str = "INFO"
-    API_KEY: str = "change-me"
+    API_KEY: str = ""
 
     # JWT Auth
-    JWT_SECRET_KEY: str = "change-me-to-a-long-random-secret-min-32-chars"
+    JWT_SECRET_KEY: str = ""
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # PostgreSQL
-    DATABASE_URL: str = "postgresql+asyncpg://user:pass@localhost/qwenchat"
-    SYNC_DATABASE_URL: str = "postgresql+psycopg2://user:pass@localhost/qwenchat"
+    DATABASE_URL: str = "postgresql+asyncpg://user:pass@localhost/analyticsgpt"
+    SYNC_DATABASE_URL: str = "postgresql+psycopg2://user:pass@localhost/analyticsgpt"
     DB_POOL_SIZE: int = 10
     DB_MAX_OVERFLOW: int = 20
 
     # Qdrant
     QDRANT_HOST: str = "localhost"
     QDRANT_PORT: int = 6333
-    QDRANT_COLLECTION: str = "chat_memories"
+    QDRANT_COLLECTION: str = ""
     QDRANT_VECTOR_SIZE: int = 384
 
-    # LLM (Qwen 2.5 7B Instruct via llama.cpp)
-    MODEL_BASE_PATH: str = "/models"
-    QWEN_MODEL_PATH: str = "/models/qwen"
-    LLM_CTX_SIZE: int = 120000
-    LLM_THREADS: int = 8
-    LLM_GPU_LAYERS: int = 0
+    # LLM (Groq API)
+    GROQ_API_KEY: str = ""
+    GROQ_DEFAULT_MODEL: str = "openai/gpt-oss-120b"
     LLM_MAX_TOKENS: int = 4096  
-    LLM_TEMPERATURE: float = 0.7
+    LLM_TEMPERATURE: float = 0.2
     LLM_TOP_P: float = 0.9
-    LLM_REPEAT_PENALTY: float = 1.1
 
     # Embeddings (BGE-small)
-    BGE_MODEL_PATH: str = "/models/bge-small-en"
     EMBEDDING_MODEL_NAME: str = "BAAI/bge-small-en"
-    TOKENIZER_NAME: str = "Qwen/Qwen2.5-7B-Instruct"
 
     # Cache
     CACHE_TYPE: str = "memory"

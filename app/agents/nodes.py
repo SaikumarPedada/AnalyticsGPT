@@ -13,16 +13,6 @@ import os
 
 logger = get_logger(__name__)
 
-# Errors that the retry loop can NEVER fix — fail fast instead of burning retries
-_FATAL_PREFIXES = (
-    "Dataset load failed",
-    "Unsupported file type",
-)
-
-
-def _is_fatal(error: str) -> bool:
-    return any(error.startswith(p) for p in _FATAL_PREFIXES)
-
 
 def _ensure_openpyxl() -> None:
     """Install openpyxl at runtime if it is missing."""
@@ -44,6 +34,7 @@ async def router_node(state: dict):
     mode = await router_service.route(
         state["message"],
         state.get("mode"),
+        model=state.get("model"),
     )
     state["mode"] = mode
     return state
@@ -56,18 +47,33 @@ async def dataset_node(state: dict):
         state["df"] = None
         return state
 
+    from app.db.session import AsyncSessionLocal
+    from app.models import Dataset
+    import io
+    from sqlalchemy import select
+
     try:
-        ext = os.path.splitext(file_path)[-1].lower()
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Dataset).where(Dataset.dataset_id == file_path)
+            )
+            db_dataset = result.scalar_one_or_none()
+
+        if not db_dataset:
+            raise ValueError(f"Dataset not found in database: {file_path}")
+
+        ext = os.path.splitext(db_dataset.filename)[-1].lower()
+        content = db_dataset.content
 
         if ext == ".csv":
             try:
-                df = pd.read_csv(file_path)
+                df = pd.read_csv(io.BytesIO(content))
             except UnicodeDecodeError:
-                df = pd.read_csv(file_path, encoding="latin1")
+                df = pd.read_csv(io.BytesIO(content), encoding="latin1")
 
         elif ext in [".xlsx", ".xls"]:
             _ensure_openpyxl()                          # ← auto-install guard
-            df = pd.read_excel(file_path, engine="openpyxl")
+            df = pd.read_excel(io.BytesIO(content), engine="openpyxl")
 
         else:
             raise ValueError(f"Unsupported file type: {ext}")
@@ -98,10 +104,10 @@ async def planner_node(state: dict):
         message=state["message"],
         mode=state["mode"],
         schema=state.get("schema", ""),
+        model=state.get("model"),
     )
 
     state["plan"] = plan
-    state["steps"] = plan.get("steps", [])
     return state
 
 
@@ -128,6 +134,7 @@ async def executor_node(state: AgentState):
             mode=mode,
             query=query,
             stream_callback=stream,
+            model=state.get("model"),
         )
 
         state["result"] = result
@@ -156,15 +163,16 @@ async def retry_node(state: dict):
 
     prompt = RETRY_PROMPT.format(
         message=message,
-        plan=plan,
+        code=plan.get("code", ""),
         error=error,
     )
 
     result = {}
     try:
-        result = await llm_service.generate([
-            {"role": "user", "content": prompt}
-        ])
+        result = await llm_service.generate(
+            [{"role": "user", "content": prompt}],
+            model=state.get("model"),
+        )
 
         raw = result["text"].strip()
         # Strip markdown fences if present
@@ -175,7 +183,6 @@ async def retry_node(state: dict):
         new_plan = json.loads(raw)
 
         state["plan"] = new_plan
-        state["steps"] = new_plan.get("steps", [])
         state["error"] = None   # clear so executor gets a clean run
 
     except (json.JSONDecodeError, KeyError) as e:
@@ -193,14 +200,16 @@ async def explanation_node(state: dict):
         state["explanation"] = ""
         return state
 
-    steps = state.get("steps", [])
-    if not steps:
+    plan = state.get("plan", {})
+    code = plan.get("code", "")
+    if not code:
         state["explanation"] = ""
         return state
 
     explanation = await explanation_service.generate(
         message=state.get("message"),
-        steps=steps,
+        code=code,
+        model=state.get("model"),
     )
     state["explanation"] = explanation
     return state

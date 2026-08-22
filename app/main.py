@@ -22,15 +22,15 @@ async def lifespan(app: FastAPI):
     logger.info("=== Starting AnalyticsGPT-Copilot backend ===")
 
     try:
-        logger.info("Loading LLM model…")
-        llm_service.load_model()
-        logger.info("Loading tokenizer…")
-        llm_service.load_tokenizer()
-        logger.info("Running LLM warmup…")
-        llm_service.generate_sync([{"role": "user", "content": "Hello"}])
-        logger.info("LLM ready")
+        logger.info("Verifying Groq API configuration…")
+        if not settings.GROQ_API_KEY or settings.GROQ_API_KEY in ("change-me", "your_groq_api_key_here"):
+            logger.warning("GROQ_API_KEY is not configured yet. Please configure it in .env")
+        else:
+            logger.info("Running Groq LLM warmup…")
+            await llm_service.generate([{"role": "user", "content": "Hello"}])
+            logger.info("Groq API connection verified")
     except Exception as e:
-        logger.exception("Failed to load LLM")
+        logger.exception("Failed to verify Groq connection")
         raise e
 
     try:

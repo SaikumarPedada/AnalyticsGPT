@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, Integer, String, DateTime, ForeignKey,
-    Text, Index, Boolean
+    Text, Index, Boolean, LargeBinary
 )
 from datetime import datetime
 from app.db.base import Base
@@ -65,17 +65,11 @@ class Message(Base):
     )
 
 
-class UserMemory(Base):
-    """Persistent key-value facts extracted from conversations."""
-    __tablename__ = "user_memory"
 
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
-    key = Column(String(128), nullable=False)
-    value = Column(Text, nullable=False)
-    source_session_id = Column(String(36), nullable=True)
+class Dataset(Base):
+    __tablename__ = "datasets"
+
+    dataset_id = Column(String(36), primary_key=True, index=True)
+    filename = Column(String(255), nullable=False)
+    content = Column(LargeBinary, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-    __table_args__ = (
-        Index("idx_memory_user", "user_id"),
-    )
