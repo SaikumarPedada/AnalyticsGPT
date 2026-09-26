@@ -1,14 +1,12 @@
 """
 MCP (Memory & Context Persistence) service.
 Responsible for:
-  - Saving sessions + messages to PostgreSQL
+  - Saving sessions + messages to PostgreSQL using Tortoise ORM
   - Querying conversation history for context window reconstruction
   - Indexing messages into Qdrant for semantic retrieval
   - Building the full context (sliding window + semantic hits) for the LLM
 """
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Optional
 import json
 
@@ -22,14 +20,18 @@ settings = get_settings()
 logger = get_logger(__name__)
 
 
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 class MCPService:
 
     # ── Save session ──────────────────────────────────────────────────────────
-    async def save_session(self, db: AsyncSession, session_data: dict) -> None:
+    async def save_session(self, session_data: dict) -> None:
         """
         Persist a completed session:
-        1. Insert ChatSession row
-        2. Batch-insert all Message rows
+        1. Insert/update ChatSession row
+        2. Insert all Message rows
         3. Index message embeddings into Qdrant
         4. Update user.last_session_ended
         """
@@ -45,59 +47,52 @@ class MCPService:
         first_user = next((m["content"] for m in conversation if m["role"] == "user"), None)
         title = (first_user[:72] + "…") if first_user and len(first_user) > 72 else first_user
 
-        existing_session = await db.get(ChatSession, session_id)
+        existing_session = await ChatSession.get_or_none(session_id=session_id)
         if existing_session:
             existing_session.tokens_consumed = session_data.get("tokens", 0)
-            existing_session.session_end = datetime.utcnow()
+            existing_session.session_end = _now_utc()
             if not existing_session.title and title:
                 existing_session.title = title
+            await existing_session.save()
             # Delete existing messages in DB for this session
-            await db.execute(
-                Message.__table__.delete().where(Message.session_id == session_id)
-            )
+            await Message.filter(session_id=session_id).delete()
         else:
-            session_row = ChatSession(
+            await ChatSession.create(
                 session_id=session_id,
                 user_id=user_id,
                 title=title,
-                session_start=session_data["start_time"],
-                session_end=datetime.utcnow(),
+                session_start=session_data.get("start_time"),
+                session_end=_now_utc(),
                 tokens_consumed=session_data.get("tokens", 0),
                 tools_used=json.dumps(session_data.get("tools", [])),
             )
-            db.add(session_row)
-        await db.flush()   # get session_id into DB before messages FK
 
-        messages = []
-        for msg in conversation:
-            m = Message(
+        messages_to_create = [
+            Message(
                 session_id=session_id,
                 user_id=user_id,
                 role=msg["role"],
                 content=msg["content"],
                 tokens=msg.get("tokens", 0),
             )
-            messages.append(m)
+            for msg in conversation
+        ]
 
-        db.add_all(messages)
-        await db.flush()   # get message_ids back
+        await Message.bulk_create(messages_to_create)
 
         # Update last_session_ended on the user
-        await db.execute(
-            update(User)
-            .where(User.user_id == user_id)
-            .values(last_session_ended=datetime.utcnow())
-        )
+        await User.filter(user_id=user_id).update(last_session_ended=_now_utc())
 
-        await db.commit()
+        # Fetch created messages with primary keys populated for Qdrant indexing
+        saved_messages = await Message.filter(session_id=session_id)
 
-        # Async index into Qdrant (best-effort, don't block commit)
+        # Async index into Qdrant (best-effort)
         try:
-            await self._index_session_to_qdrant(messages)
+            await self._index_session_to_qdrant(saved_messages)
         except Exception as e:
             logger.warning(f"Qdrant indexing skipped: {e}")
 
-        logger.info(f"Session {session_id} saved ({len(messages)} messages, {session_data.get('tokens', 0)} tokens)")
+        logger.info(f"Session {session_id} saved ({len(saved_messages)} messages, {session_data.get('tokens', 0)} tokens)")
 
     # ── Qdrant indexing ───────────────────────────────────────────────────────
     async def _index_session_to_qdrant(self, messages: List[Message]) -> None:
@@ -121,7 +116,6 @@ class MCPService:
     # ── Context reconstruction ────────────────────────────────────────────────
     async def build_context(
         self,
-        db: AsyncSession,
         user_id: int,
         current_message: str,
         current_conversation: List[Dict],
@@ -146,7 +140,7 @@ class MCPService:
             logger.warning(f"Semantic retrieval skipped: {e}")
 
         # 2. Recent history from DB
-        recent = await self.get_last_messages(db, user_id=user_id, limit=limit)
+        recent = await self.get_last_messages(user_id=user_id, limit=limit)
 
         # 3. Deduplicate: prefer recent window over semantic hits
         recent_contents = {m["content"] for m in recent}
@@ -157,26 +151,15 @@ class MCPService:
 
     # ── History queries ───────────────────────────────────────────────────────
     async def get_last_messages(
-        self, db: AsyncSession, user_id: int, limit: int = 10
+        self, user_id: int, limit: int = 10
     ) -> List[Dict]:
-        result = await db.execute(
-            select(Message)
-            .where(Message.user_id == user_id)
-            .order_by(Message.created_at.desc())
-            .limit(limit)
-        )
-        messages = result.scalars().all()
+        messages = await Message.filter(user_id=user_id).order_by("-created_at").limit(limit)
         return [{"role": m.role, "content": m.content} for m in reversed(messages)]
 
     async def get_session_messages(
-        self, db: AsyncSession, session_id: str
+        self, session_id: str
     ) -> List[Dict]:
-        result = await db.execute(
-            select(Message)
-            .where(Message.session_id == session_id)
-            .order_by(Message.created_at.asc())
-        )
-        messages = result.scalars().all()
+        messages = await Message.filter(session_id=session_id).order_by("created_at")
         return [
             {
                 "message_id": m.message_id,
@@ -189,15 +172,9 @@ class MCPService:
         ]
 
     async def get_user_sessions(
-        self, db: AsyncSession, user_id: int, limit: int = 50
+        self, user_id: int, limit: int = 50
     ) -> List[Dict]:
-        result = await db.execute(
-            select(ChatSession)
-            .where(ChatSession.user_id == user_id)
-            .order_by(ChatSession.created_at.desc())
-            .limit(limit)
-        )
-        sessions = result.scalars().all()
+        sessions = await ChatSession.filter(user_id=user_id).order_by("-created_at").limit(limit)
         return [
             {
                 "session_id": s.session_id,
@@ -210,19 +187,16 @@ class MCPService:
             for s in sessions
         ]
 
-    async def delete_session(self, db: AsyncSession, session_id: str) -> None:
+    async def delete_session(self, session_id: str) -> None:
         # Delete Qdrant vectors first
         try:
             qdrant_service.delete_session_vectors(session_id)
         except Exception as e:
             logger.warning(f"Qdrant delete skipped: {e}")
 
-        await db.execute(Message.__table__.delete().where(Message.session_id == session_id))
-        await db.execute(ChatSession.__table__.delete().where(ChatSession.session_id == session_id))
-        await db.commit()
+        await Message.filter(session_id=session_id).delete()
+        await ChatSession.filter(session_id=session_id).delete()
         logger.info(f"Session {session_id} deleted")
-
-
 
 
 mcp_service = MCPService()

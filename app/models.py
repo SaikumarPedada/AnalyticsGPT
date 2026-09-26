@@ -1,75 +1,73 @@
-from sqlalchemy import (
-    Column, Integer, String, DateTime, ForeignKey,
-    Text, Index, Boolean, LargeBinary
-)
-from datetime import datetime
-from app.db.base import Base
+from tortoise import fields
+from tortoise.models import Model
 
 
-class User(Base):
-    __tablename__ = "users"
+class User(Model):
+    user_id = fields.IntField(pk=True)
+    username = fields.CharField(max_length=64, unique=True, index=True)
+    email = fields.CharField(max_length=255, unique=True, index=True)
+    password = fields.CharField(max_length=255)
+    is_active = fields.BooleanField(default=True)
+    last_login = fields.DatetimeField(null=True)
+    last_session_ended = fields.DatetimeField(null=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
 
-    user_id = Column(Integer, primary_key=True, index=True)
-    username = Column(String(64), unique=True, nullable=False, index=True)
-    email = Column(String(255), unique=True, nullable=False, index=True)
-    password = Column(String(255), nullable=False)
-    is_active = Column(Boolean, default=True, nullable=False)
-    last_login = Column(DateTime, nullable=True)
-    last_session_ended = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    class Meta:
+        table = "users"
 
 
-class RefreshToken(Base):
+class RefreshToken(Model):
     """Stored refresh tokens for rotation / revocation."""
-    __tablename__ = "refresh_tokens"
+    id = fields.IntField(pk=True)
+    user = fields.ForeignKeyField("models.User", related_name="refresh_tokens", on_delete=fields.CASCADE, source_field="user_id")
+    token_hash = fields.CharField(max_length=255, unique=True, index=True)
+    expires_at = fields.DatetimeField()
+    revoked = fields.BooleanField(default=False)
+    created_at = fields.DatetimeField(auto_now_add=True)
 
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
-    token_hash = Column(String(255), unique=True, nullable=False, index=True)
-    expires_at = Column(DateTime, nullable=False)
-    revoked = Column(Boolean, default=False, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-
-class ChatSession(Base):
-    __tablename__ = "chat_sessions"
-
-    session_id = Column(String(36), primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
-    title = Column(String(255), nullable=True)           # auto-generated from first message
-    session_start = Column(DateTime, nullable=True)
-    session_end = Column(DateTime, nullable=True)
-    tokens_consumed = Column(Integer, default=0)
-    tools_used = Column(Text, default="[]")
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-    __table_args__ = (
-        Index("idx_session_user", "user_id", "created_at"),
-    )
+    class Meta:
+        table = "refresh_tokens"
 
 
-class Message(Base):
-    __tablename__ = "messages"
+class ChatSession(Model):
+    session_id = fields.CharField(pk=True, max_length=36)
+    user = fields.ForeignKeyField("models.User", related_name="chat_sessions", on_delete=fields.CASCADE, source_field="user_id")
+    title = fields.CharField(max_length=255, null=True)           # auto-generated from first message
+    session_start = fields.DatetimeField(null=True)
+    session_end = fields.DatetimeField(null=True)
+    tokens_consumed = fields.IntField(default=0)
+    tools_used = fields.TextField(default="[]")
+    created_at = fields.DatetimeField(auto_now_add=True)
 
-    message_id = Column(Integer, primary_key=True, index=True)
-    session_id = Column(String(36), ForeignKey("chat_sessions.session_id", ondelete="CASCADE"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
-    role = Column(String(16), nullable=False)       # "user" | "assistant" | "system"
-    content = Column(Text, nullable=False)
-    tokens = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-    __table_args__ = (
-        Index("idx_msg_user_time", "user_id", "created_at"),
-        Index("idx_msg_session", "session_id", "created_at"),
-    )
+    class Meta:
+        table = "chat_sessions"
+        indexes = (
+            ("user_id", "created_at"),
+        )
 
 
+class Message(Model):
+    message_id = fields.IntField(pk=True)
+    session = fields.ForeignKeyField("models.ChatSession", related_name="messages", on_delete=fields.CASCADE, source_field="session_id")
+    user = fields.ForeignKeyField("models.User", related_name="messages", on_delete=fields.CASCADE, source_field="user_id")
+    role = fields.CharField(max_length=16)       # "user" | "assistant" | "system"
+    content = fields.TextField()
+    tokens = fields.IntField(default=0)
+    created_at = fields.DatetimeField(auto_now_add=True)
 
-class Dataset(Base):
-    __tablename__ = "datasets"
+    class Meta:
+        table = "messages"
+        indexes = (
+            ("user_id", "created_at"),
+            ("session_id", "created_at"),
+        )
 
-    dataset_id = Column(String(36), primary_key=True, index=True)
-    filename = Column(String(255), nullable=False)
-    content = Column(LargeBinary, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+class Dataset(Model):
+    dataset_id = fields.CharField(pk=True, max_length=36)
+    filename = fields.CharField(max_length=255)
+    content = fields.BinaryField()
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "datasets"

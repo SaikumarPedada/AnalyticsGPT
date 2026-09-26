@@ -1,9 +1,11 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 from typing import Optional, List
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
     # App
     APP_NAME: str = "AnalyticsGPT"
     APP_ENV: str = "development"
@@ -17,8 +19,7 @@ class Settings(BaseSettings):
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # PostgreSQL
-    DATABASE_URL: str = "postgresql+asyncpg://user:pass@localhost/analyticsgpt"
-    SYNC_DATABASE_URL: str = "postgresql+psycopg2://user:pass@localhost/analyticsgpt"
+    DATABASE_URL: str = "postgres://user:pass@localhost:5432/analyticsgpt"
     DB_POOL_SIZE: int = 10
     DB_MAX_OVERFLOW: int = 20
 
@@ -59,9 +60,6 @@ class Settings(BaseSettings):
 
     # CORS
     ALLOWED_ORIGINS: List[str] = ["http://localhost:5173", "http://localhost:3000"]
-
-    class Config:
-        env_file = ".env"
 
 
 @lru_cache()

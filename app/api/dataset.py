@@ -3,9 +3,7 @@ import uuid
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.security import OAuth2PasswordBearer
 from typing import Optional
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.session import get_db
 from app.models import Dataset
 
 router = APIRouter(prefix="/dataset", tags=["dataset"])
@@ -35,7 +33,6 @@ def get_optional_user_id(token: Optional[str] = Depends(_optional_oauth2)) -> Op
 async def upload_dataset(
     file: UploadFile = File(...),
     user_id: Optional[int] = Depends(get_optional_user_id),
-    db: AsyncSession = Depends(get_db),
 ):
     """
     Upload a CSV / Excel dataset directly to the database.
@@ -61,14 +58,11 @@ async def upload_dataset(
 
     # Store dataset directly in the database
     dataset_id = str(uuid.uuid4())
-    db_dataset = Dataset(
+    await Dataset.create(
         dataset_id=dataset_id,
         filename=file.filename or "dataset",
         content=content,
     )
-    
-    db.add(db_dataset)
-    await db.commit()
 
     return {
         "file_path": dataset_id,  # return UUID in file_path field for compatibility
