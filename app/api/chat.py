@@ -11,9 +11,7 @@ Chat API:
 import asyncio
 import json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.session import get_db
 from app.services.cache_service import cache
 from app.services.llm_service import llm_service
 from app.services.mcp_service import mcp_service
@@ -50,7 +48,7 @@ class ConnectionManager:
     async def send_json(self, session_id: str, data: dict):
         ws = self._connections.get(session_id)
         if ws:
-            await ws.send_text(json.dumps(data))
+            await ws.send_text(json.dumps(data, default=str))
 
     async def send_error(self, session_id: str, error: str):
         await self.send_json(session_id, {"type": "error", "text": error})
@@ -73,7 +71,6 @@ async def start_session(user_id: int = Depends(get_current_user_id)):
 async def end_session(
     session_id: str,
     user_id: int = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
 ):
     if not cache.session_exists(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
@@ -84,7 +81,7 @@ async def end_session(
     if session_data["user_id"] != user_id:
         raise HTTPException(status_code=403, detail="Not your session")
 
-    await mcp_service.save_session(db, session_data)
+    await mcp_service.save_session(session_data)
 
     logger.info(f"Session saved: {session_id}")
     return {"message": "Session saved"}
@@ -96,16 +93,14 @@ async def end_session(
 @router.get("/sessions")
 async def list_sessions(
     user_id: int = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
 ):
-    return await mcp_service.get_user_sessions(db, user_id=user_id)
+    return await mcp_service.get_user_sessions(user_id=user_id)
 
 
 @router.get("/session/{session_id}/messages")
 async def session_messages(
     session_id: str,
     user_id: int = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
 ):
     if cache.session_exists(session_id):
         data = cache.get_session(session_id)
@@ -113,16 +108,15 @@ async def session_messages(
             raise HTTPException(status_code=403, detail="Not your session")
         return cache.get_conversation(session_id)
 
-    return await mcp_service.get_session_messages(db, session_id=session_id)
+    return await mcp_service.get_session_messages(session_id=session_id)
 
 
 @router.delete("/session/{session_id}")
 async def delete_session(
     session_id: str,
     user_id: int = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
 ):
-    await mcp_service.delete_session(db, session_id=session_id)
+    await mcp_service.delete_session(session_id=session_id)
     return {"message": "Session deleted"}
 
 
@@ -143,7 +137,6 @@ async def _heartbeat(websocket: WebSocket, session_id: str, interval: int):
 async def websocket_chat(
     websocket: WebSocket,
     session_id: str,
-    db: AsyncSession = Depends(get_db),
 ):
     await manager.connect(websocket, session_id)
 
@@ -232,7 +225,6 @@ async def websocket_chat(
                     current_conv = cache.get_conversation(session_id)
 
                     full_context = await mcp_service.build_context(
-                        db,
                         user_id=user_id,
                         current_message=user_message,
                         current_conversation=current_conv,
@@ -255,7 +247,7 @@ async def websocket_chat(
             try:
                 session_data = cache.get_session(session_id)
                 session_data["session_id"] = session_id
-                await mcp_service.save_session(db, session_data)
+                await mcp_service.save_session(session_data)
             except Exception as se:
                 logger.error(f"Auto-save session failed: {se}")
 

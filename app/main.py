@@ -11,6 +11,9 @@ from app.api.chat import router as chat_router
 from app.api.health import router as health_router
 from app.api.dataset import router as dataset_router
 
+from app.db.session import TORTOISE_ORM
+from tortoise.contrib.fastapi import register_tortoise
+
 settings = get_settings()
 setup_logging(settings.LOG_LEVEL)
 logger = get_logger(__name__)
@@ -54,6 +57,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+register_tortoise(
+    app,
+    config=TORTOISE_ORM,
+    generate_schemas=False,
+    add_exception_handlers=True,
+)
+
 # CORS
 app.add_middleware(
     CORSMiddleware,
@@ -72,3 +82,17 @@ app.include_router(dataset_router)
 @app.get("/")
 def root():
     return {"app": settings.APP_NAME, "env": settings.APP_ENV, "version": "1.0.0"}
+
+@app.get("/mcp/tools")
+def list_mcp_tools():
+    """List all registered FastMCP tools."""
+    from app.mcp_server import mcp_server
+    tools = []
+    for name, func in getattr(mcp_server, "_tools", {}).items():
+        tools.append({
+            "name": name,
+            "description": (func.__doc__ or "").strip(),
+        })
+    return {"mcp_server": mcp_server.name, "tools": tools}
+
+

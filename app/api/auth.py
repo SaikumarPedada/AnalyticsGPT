@@ -1,10 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import hashlib
 
-from app.db.session import get_db
 from app.models import User, RefreshToken
 from app.schemas.auth import RegisterRequest, LoginRequest, TokenResponse, RefreshRequest, UserOut
 from app.core.security import (
@@ -24,34 +21,32 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db)):
+async def register(payload: RegisterRequest):
     # Check username uniqueness
-    existing = await db.execute(select(User).where(User.username == payload.username))
-    if existing.scalar_one_or_none():
+    if await User.filter(username=payload.username).exists():
         raise HTTPException(status_code=409, detail="Username already taken")
 
     # Check email uniqueness
-    existing_email = await db.execute(select(User).where(User.email == payload.email))
-    if existing_email.scalar_one_or_none():
+    if await User.filter(email=payload.email).exists():
         raise HTTPException(status_code=409, detail="Email already registered")
 
-    user = User(
+    user = await User.create(
         username=payload.username,
         email=payload.email,
         password=hash_password(payload.password),
     )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
     logger.info(f"New user registered: {user.username} ({user.email})")
     return {"message": "Account created", "user_id": user.user_id}
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(User.email == payload.email))
-    user = result.scalar_one_or_none()
+async def login(payload: LoginRequest):
+    user = await User.get_or_none(email=payload.email)
 
     if not user or not verify_password(payload.password, user.password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -65,15 +60,15 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
     refresh_token = create_refresh_token(token_data)
 
     # Store refresh token hash
-    db.add(RefreshToken(
+    await RefreshToken.create(
         user_id=user.user_id,
         token_hash=_hash_token(refresh_token),
-        expires_at=datetime.utcnow() + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS),
-    ))
+        expires_at=_now_utc() + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS),
+    )
 
     # Update last_login
-    user.last_login = datetime.utcnow()
-    await db.commit()
+    user.last_login = _now_utc()
+    await user.save()
 
     logger.info(f"User logged in: {user.username}")
     return TokenResponse(
@@ -86,40 +81,42 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh(payload: RefreshRequest, db: AsyncSession = Depends(get_db)):
+async def refresh(payload: RefreshRequest):
     decoded = decode_token(payload.refresh_token)
     if decoded.get("type") != "refresh":
         raise HTTPException(status_code=401, detail="Invalid token type")
 
     token_hash = _hash_token(payload.refresh_token)
-    result = await db.execute(
-        select(RefreshToken).where(
-            RefreshToken.token_hash == token_hash,
-            RefreshToken.revoked == False,
-        )
+    stored = await RefreshToken.get_or_none(
+        token_hash=token_hash,
+        revoked=False,
     )
-    stored = result.scalar_one_or_none()
-    if not stored or stored.expires_at < datetime.utcnow():
+    
+    if not stored:
+        raise HTTPException(status_code=401, detail="Refresh token expired or revoked")
+
+    expires_at = stored.expires_at.replace(tzinfo=timezone.utc) if stored.expires_at.tzinfo is None else stored.expires_at
+    if expires_at < _now_utc():
         raise HTTPException(status_code=401, detail="Refresh token expired or revoked")
 
     user_id = int(decoded["sub"])
-    result2 = await db.execute(select(User).where(User.user_id == user_id))
-    user = result2.scalar_one_or_none()
+    user = await User.get_or_none(user_id=user_id)
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found")
 
     # Rotate: revoke old, issue new
     stored.revoked = True
+    await stored.save()
+
     token_data = {"sub": str(user_id)}
     new_access = create_access_token(token_data)
     new_refresh = create_refresh_token(token_data)
 
-    db.add(RefreshToken(
+    await RefreshToken.create(
         user_id=user_id,
         token_hash=_hash_token(new_refresh),
-        expires_at=datetime.utcnow() + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS),
-    ))
-    await db.commit()
+        expires_at=_now_utc() + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS),
+    )
 
     return TokenResponse(
         access_token=new_access,
@@ -131,22 +128,18 @@ async def refresh(payload: RefreshRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/logout")
-async def logout(payload: RefreshRequest, db: AsyncSession = Depends(get_db)):
+async def logout(payload: RefreshRequest):
     token_hash = _hash_token(payload.refresh_token)
-    result = await db.execute(
-        select(RefreshToken).where(RefreshToken.token_hash == token_hash)
-    )
-    stored = result.scalar_one_or_none()
+    stored = await RefreshToken.get_or_none(token_hash=token_hash)
     if stored:
         stored.revoked = True
-        await db.commit()
+        await stored.save()
     return {"message": "Logged out"}
 
 
 @router.get("/me", response_model=UserOut)
-async def me(user_id: int = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(User.user_id == user_id))
-    user = result.scalar_one_or_none()
+async def me(user_id: int = Depends(get_current_user_id)):
+    user = await User.get_or_none(user_id=user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user

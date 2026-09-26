@@ -47,17 +47,11 @@ async def dataset_node(state: dict):
         state["df"] = None
         return state
 
-    from app.db.session import AsyncSessionLocal
     from app.models import Dataset
     import io
-    from sqlalchemy import select
 
     try:
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(Dataset).where(Dataset.dataset_id == file_path)
-            )
-            db_dataset = result.scalar_one_or_none()
+        db_dataset = await Dataset.get_or_none(dataset_id=file_path)
 
         if not db_dataset:
             raise ValueError(f"Dataset not found in database: {file_path}")
@@ -228,8 +222,8 @@ async def response_node(state: dict):
     explanation = state.get("explanation", "")
 
     if isinstance(result, dict):
-        # Use indent=2 for readable, formatted JSON output
-        result_text = json.dumps(result, indent=2)
+        # Use indent=2 for readable, formatted JSON output and default=str for Timestamp/datetimes/etc.
+        result_text = json.dumps(result, indent=2, default=str)
     elif result is None:
         result_text = "(no result produced)"
     else:

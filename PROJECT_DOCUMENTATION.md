@@ -20,6 +20,12 @@ To maintain long-term memory across isolated WebSocket requests, the system impl
 - **Semantic Memory (Qdrant)**: Embeds the user's current query into a 384-dimensional space using BGE-small. It runs a Cosine Similarity search against the historical messages database in Qdrant to pull relevant conversations from past sessions.
 - **Deduplication & Union**: The context-merging service aggregates both lists, deduplicates matching items based on text hashing, and prepends semantic logs as background context for the LLM.
 
+### Model Context Protocol (FastMCP) & Tool System
+In addition to internal context persistence, the system incorporates the official **Model Context Protocol (FastMCP)** framework (`app/mcp_server.py`).
+- **Standardized AI Tools**: Functions decorated with `@mcp.tool()` (`search_past_memory`, `get_dataset_info`, `list_user_sessions`, `execute_pandas_code`) are registered as standardized MCP capabilities.
+- **Groq LLM Integration**: `LLMService` converts registered `@mcp.tool()` signatures into OpenAI-compatible tool schemas passed to Groq API completion requests.
+- **Discovery Endpoint**: Exposes `/mcp/tools` for external MCP clients (Cursor, Claude Desktop, AGY) to discover available tools.
+
 ---
 
 ## 2. Detailed Project Workflows
@@ -83,33 +89,36 @@ Handles cryptographic tasks and authentication checks.
 ### Database Connectivity & Models
 
 #### `app/db/session.py`
-- **`AsyncSessionLocal`**: Async sessionmaker utilizing `asyncpg` for standard database queries.
-- **`sync_engine`**: Sync database engine utilizing `psycopg2` for migration scripts.
-- **`get_db()`**: Async generator yielding active PostgreSQL session connections.
+- **`TORTOISE_ORM`**: Configuration mapping dictionary specifying PostgreSQL database connection settings (`postgres://...`), model registrations, and Aerich migration settings. Registered with FastAPI in `app/main.py` via `register_tortoise`.
+
+#### `aerich.ini`
+- Configuration file for the **Aerich** database migration CLI, pointing to `app.db.session.TORTOISE_ORM`.
 
 #### `app/models.py`
-Declares SQLAlchemy declarative database mapping models.
-- **`class User(Base)`**: Represents registered user profiles (username, email, pass hashes).
-- **`class RefreshToken(Base)`**: Tracks issued refresh tokens for revocation and rotation checks.
-- **`class ChatSession(Base)`**: Records completed chat sessions.
-- **`class Message(Base)`**: Persists standard message entities.
-- **`class Dataset(Base)`**:
+Declares Tortoise ORM database mapping models inheriting from `tortoise.models.Model`.
+- **`class User(Model)`**: Represents registered user profiles (`user_id` primary key, `username`, `email`, `password` hash, `is_active`, `created_at`, `last_login`, `last_session_ended`).
+- **`class RefreshToken(Model)`**: Tracks issued refresh tokens for revocation and rotation checks (`id`, `user` foreign key to `User`, `token_hash`, `expires_at`, `revoked`, `created_at`).
+- **`class ChatSession(Model)`**: Records completed chat sessions (`session_id` primary key, `user` foreign key to `User`, `title`, `session_start`, `session_end`, `tokens_consumed`, `tools_used`, `created_at`).
+- **`class Message(Model)`**: Persists standard message entities (`message_id` primary key, `session` foreign key to `ChatSession`, `user` foreign key to `User`, `role`, `content`, `tokens`, `created_at`).
+- **`class Dataset(Model)`**:
   - **Purpose**: Holds uploaded datasets.
-  - **Fields**: `dataset_id` (UUID primary key), `filename` (source filename), `content` (raw binary bytes stored as `LargeBinary`).
+  - **Fields**: `dataset_id` (UUID primary key), `filename` (source filename), `content` (raw binary bytes stored as `BinaryField`).
 
 ---
 
 ### API Routers
 
 #### `app/api/auth.py`
-- **`register(user_schema, db) -> token`**: Creates user profiles, raising errors if conflicts occur.
-- **`login(credentials, db) -> tokens`**: Verifies password hashes and issues access and refresh tokens.
-- **`refresh(token, db) -> tokens`**: Generates new short-term access tokens using a valid refresh token.
+- **`register(payload) -> response`**: Creates user profiles via `User.create()`, raising 409 errors if conflicts occur.
+- **`login(payload) -> tokens`**: Verifies password hashes, updates `last_login`, and issues access and refresh tokens.
+- **`refresh(payload) -> tokens`**: Generates new short-term access tokens using a valid refresh token.
+- **`logout(payload) -> dict`**: Revokes stored refresh tokens.
+- **`me(user_id) -> UserOut`**: Returns authenticated user profile.
 
 #### `app/api/dataset.py`
-- **`upload_dataset(file, user_id, db) -> dict`**:
+- **`upload_dataset(file, user_id) -> dict`**:
   - **Purpose**: Receives dataset uploads.
-  - **Mechanism**: Reads files into memory, validates constraints, instantiates a `Dataset` model, commits it to the database, and returns the UUID as `file_path`.
+  - **Mechanism**: Reads files into memory, validates constraints, creates a `Dataset` instance via `Dataset.create()`, and returns the UUID as `file_path`.
 
 #### `app/api/chat.py`
 Orchestrates WebSocket connections and fallback pathways.
@@ -118,15 +127,15 @@ Orchestrates WebSocket connections and fallback pathways.
   - `disconnect(session_id)`: Removes connections from the active pool.
   - `send_json(session_id, data)`: Transmits JSON payloads over the socket.
   - `send_error(session_id, error)`: Transmits formatted error strings.
-- **`delete_session(session_id, user_id, db)`**:
+- **`delete_session(session_id, user_id)`**:
   - **Purpose**: DELETE endpoint removing chat histories.
   - **Mechanism**: Invokes `mcp_service.delete_session` to drop both relational PostgreSQL database logs and semantic Qdrant vectors.
-- **`websocket_chat(websocket, session_id, db)`**:
+- **`websocket_chat(websocket, session_id)`**:
   - **Purpose**: Main WebSocket connection loop.
   - **Mechanism**: Handles heartbeats, receives user messages, and parses client-requested model arguments. If `file_path` (dataset ID) is present, it runs the LangGraph engine; otherwise, it queries the Groq API using `mcp_service.build_context` for a standard conversational response. Automatically triggers `mcp_service.save_session` incrementally on every message turn to prevent chat loss and update the sidebar immediately.
 
 #### `app/api/health.py`
-- **`readiness(db)`**: Performs active connection checks on PostgreSQL, Qdrant, and the Groq configuration status.
+- **`readiness()`**: Performs active connection checks on Qdrant, active sessions, and the Groq configuration status.
 
 ---
 
@@ -148,7 +157,7 @@ Houses the execution nodes for the LangGraph pipeline.
 - **`router_node(state)`**: Categorizes queries into mode types using `router_service.route`.
 - **`dataset_node(state)`**:
   - **Purpose**: Fetches the binary dataset content from the database.
-  - **Mechanism**: Uses `AsyncSessionLocal` to fetch the binary blob by UUID, reads the file name extension, and loads the data into `pd.read_csv` or `pd.read_excel` via `io.BytesIO`.
+  - **Mechanism**: Uses `Dataset.get_or_none(dataset_id=file_path)` to fetch the binary blob by UUID, reads the file name extension, and loads the data into `pd.read_csv` or `pd.read_excel` via `io.BytesIO`.
 - **`planner_node(state)`**: Formulates a Pandas/Plotly python script using `planner_service.create_plan`.
 - **`executor_node(state)`**: Runs the generated python script using `executor_service.execute`.
 - **`retry_node(state)`**: Prompts the LLM with the failed Python code and traceback error to obtain a corrected script.
@@ -157,14 +166,26 @@ Houses the execution nodes for the LangGraph pipeline.
 
 ---
 
+### Model Context Protocol Server & Tools
+
+#### `app/mcp_server.py`
+Instantiates `mcp_server = FastMCP("AnalyticsGPT-Server")` and registers official `@mcp.tool()` capabilities:
+- **`search_past_memory(user_id, query)`**: Searches historical vector conversational memory via Qdrant.
+- **`get_dataset_info(dataset_id)`**: Inspects dataset schema, column data types, row count, and previews top 5 rows using Tortoise ORM.
+- **`list_user_sessions(user_id)`**: Retrieves user chat sessions from PostgreSQL using Tortoise ORM.
+- **`execute_pandas_code(dataset_id, python_code)`**: Safely compiles and executes dynamic Pandas data scripts against target datasets.
+
+---
+
 ### Services
 
 #### `app/services/llm_service.py`
 - **`ALLOWED_MODELS = {"openai/gpt-oss-120b", "qwen/qwen3.6-27b"}`**
 - **`class LLMService`**:
-  - **Purpose**: Core interface for Groq API text generation.
-  - **`generate(messages, model)`**:
-    - **Mechanism**: Ensures the model is allowed. Prepends `SYSTEM_PROMPT` to the message array. Sends an async POST request to the Groq completion endpoint. Returns the generated response string and the exact token usage count.
+  - **Purpose**: Core interface for Groq API text generation and tool handling.
+  - **`get_mcp_tools_schema()`**: Exports registered `@mcp.tool()` definitions from `app.mcp_server` as OpenAI-compatible tool schemas for Groq API requests.
+  - **`execute_mcp_tool(name, arguments)`**: Dispatches tool calls requested by Groq to registered `@mcp.tool()` functions.
+  - **`generate(messages, model, tools)`**: Sends an async POST request to the Groq completion endpoint with optional tools, returning text, token usage, and requested tool calls.
   - **`generate_sync(messages, model)`**: Synchronous HTTP version used for warming and checks at startup.
 
 #### `app/services/embedding_service.py`
@@ -184,12 +205,12 @@ Houses the execution nodes for the LangGraph pipeline.
 
 #### `app/services/mcp_service.py`
 - **`class MCPService`**:
-  - **`save_session(db, session_data)`**: Saves messages to PostgreSQL and uploads embeddings to Qdrant. Skips persistence entirely if the session contains no messages to avoid database clutter.
-  - **`build_context(db, user_id, current_message, current_conversation)`**: Matches semantic hits from Qdrant, merges them with the recent PostgreSQL sliding-window history, and returns a deduplicated, ordered context list.
+  - **`save_session(session_data)`**: Saves messages to PostgreSQL via Tortoise ORM and uploads embeddings to Qdrant. Skips persistence entirely if the session contains no messages to avoid database clutter.
+  - **`build_context(user_id, current_message, current_conversation)`**: Matches semantic hits from Qdrant, merges them with the recent PostgreSQL sliding-window history, and returns a deduplicated, ordered context list.
 
 #### `app/services/planner_service.py`
 - **`class PlannerService`**:
-  - **`create_plan(db, user_id, message, mode, schema, model)`**: Prompts the LLM to write a Python script operating on the input DataFrame schema. Strips markdown blocks and returns parsed JSON containing the code.
+  - **`create_plan(user_id, message, mode, schema, model)`**: Prompts the LLM to write a Python script operating on the input DataFrame schema. Strips markdown blocks and returns parsed JSON containing the code.
 
 #### `app/services/executor_service.py`
 - **`class ExecutorService`**:
